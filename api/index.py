@@ -14,7 +14,6 @@ app.add_middleware(
 )
 
 def extract_video_id(url):
-    # Ця функція залишається без змін
     patterns = [
         r'(?:https?:\/\/)?(?:www\.)?youtube\.com\/watch\?v=([a-zA-Z0-9_-]{11})',
         r'(?:https?:\/\/)?youtu\.be\/([a-zA-Z0-9_-]{11})'
@@ -25,17 +24,16 @@ def extract_video_id(url):
             return match.group(1)
     return None
 
-@app.get("/api/subtitles")
+# --- ЗМІНА ТУТ ---
+# Шлях тепер просто "/subtitles", тому що vercel.json вже додав "/api/"
+@app.get("/subtitles")
 def get_subtitles(video_url: str = Query(..., description="URL of the YouTube video")):
-    # Ми не використовуємо video_id тут, pytube працює з повним URL
     if not extract_video_id(video_url):
         raise HTTPException(status_code=400, detail="Invalid YouTube URL provided.")
         
     try:
         yt = YouTube(video_url)
         
-        # Шукаємо субтитри. 'uk' - українська, 'en' - англійська, 'ru' - російська, 'a.uk' - авто-українська
-        # Pytube використовує коди мов.
         caption = yt.captions.get_by_language_code('uk') or \
                   yt.captions.get_by_language_code('en') or \
                   yt.captions.get_by_language_code('ru') or \
@@ -47,10 +45,8 @@ def get_subtitles(video_url: str = Query(..., description="URL of the YouTube vi
                 detail="Subtitles in Ukrainian, English, or Russian were not found for this video."
             )
             
-        # Отримуємо субтитри у форматі SRT і витягуємо з них лише текст
         srt_captions = caption.generate_srt_captions()
         
-        # Простий парсинг SRT, щоб отримати чистий текст
         lines = srt_captions.split('\n')
         text_lines = [line for line in lines if not line.isdigit() and '-->' not in line and line.strip() != '']
         formatted_transcript = " ".join(text_lines)
@@ -63,6 +59,8 @@ def get_subtitles(video_url: str = Query(..., description="URL of the YouTube vi
             detail=f"An unexpected error occurred: {str(e)}"
         )
 
-@app.get("/api")
+# --- І ТУТ ТЕЖ ЗМІНА ---
+# Тестовий ендпоінт для /api/
+@app.get("/")
 def read_root():
-    return {"message": "API is working correctly!"}
+    return {"message": "API is working correctly! Send requests to /subtitles"}
