@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pytube import YouTube
-import re
+import yt_dlp
+import json
 
 app = FastAPI()
 
@@ -13,54 +13,55 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def extract_video_id(url):
-    patterns = [
-        r'(?:https?:\/\/)?(?:www\.)?youtube\.com\/watch\?v=([a-zA-Z0-9_-]{11})',
-        r'(?:https?:\/\/)?youtu\.be\/([a-zA-Z0-9_-]{11})'
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-    return None
+# Важливо: шлях тепер '/', тому що Vercel вже обробив /api/subtitles
+@app.get("/")
+def get_subtitles_handler(video_url: str = Query(..., description="URL of the YouTube video")):
+    
+    ydl_opts = {
+        'writesubtitles': True,      # Вказуємо, що потрібні субтитри
+        'sublang': 'uk,en,ru',       # Мови, які нас цікавлять
+        'skip_download': True,       # Не завантажувати саме відео
+        'extract_flat': True,        # Просто отримати інформацію
+        'outtmpl': '/tmp/%(id)s',     # Куди тимчасово зберегти файл (Vercel дозволяє писати в /tmp)
+    }
 
-# --- ЗМІНА ТУТ ---
-# Шлях тепер просто "/subtitles", тому що vercel.json вже додав "/api/"
-@app.get("/subtitles")
-def get_subtitles(video_url: str = Query(..., description="URL of the YouTube video")):
-    if not extract_video_id(video_url):
-        raise HTTPException(status_code=400, detail="Invalid YouTube URL provided.")
-        
     try:
-        yt = YouTube(video_url)
-        
-        caption = yt.captions.get_by_language_code('uk') or \
-                  yt.captions.get_by_language_code('en') or \
-                  yt.captions.get_by_language_code('ru') or \
-                  yt.captions.get_by_language_code('a.uk')
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(video_url, download=False)
+            video_id = info.get('id')
 
-        if not caption:
-            raise HTTPException(
-                status_code=404, 
-                detail="Subtitles in Ukrainian, English, or Russian were not found for this video."
-            )
+            # yt-dlp повертає словник з доступними субтитрами
+            available_subs = info.get('subtitles', {})
             
-        srt_captions = caption.generate_srt_captions()
-        
-        lines = srt_captions.split('\n')
-        text_lines = [line for line in lines if not line.isdigit() and '-->' not in line and line.strip() != '']
-        formatted_transcript = " ".join(text_lines)
+            # Шукаємо потрібну нам мову
+            target_lang = None
+            for lang in ['uk', 'en', 'ru']:
+                if lang in available_subs:
+                    target_lang = lang
+                    break
 
-        return {"transcript": formatted_transcript}
+            if not target_lang:
+                raise HTTPException(status_code=404, detail="Subtitles not found for requested languages.")
+
+            # Отримуємо дані субтитрів (це буде список)
+            subtitles_data = available_subs[target_lang]
+            
+            # Зазвичай це список словників, з яких нам потрібен лише текст
+            full_text = " ".join(item.get('line', '') for item in subtitles_data if 'line' in item)
+            
+            # Якщо з якоїсь причини yt-dlp не повернув текст напряму, то це запасний варіант (малоймовірно)
+            if not full_text:
+                # Цей блок може не знадобитись, але він для надійності
+                sub_info = ydl.extract_info(video_url, download=True)
+                sub_file_path = f"/tmp/{video_id}.{target_lang}.json"
+                with open(sub_file_path, 'r') as f:
+                    data = json.load(f)
+                    full_text = " ".join(event.get('segs', [{}])[0].get('utf8', '') for event in data.get('events', []))
+
+            if not full_text.strip():
+                 raise HTTPException(status_code=404, detail="Found subtitle track, but it was empty.")
+
+            return {"transcript": full_text.strip()}
 
     except Exception as e:
-        raise HTTPException(
-            status_code=500, 
-            detail=f"An unexpected error occurred: {str(e)}"
-        )
-
-# --- І ТУТ ТЕЖ ЗМІНА ---
-# Тестовий ендпоінт для /api/
-@app.get("/")
-def read_root():
-    return {"message": "API is working correctly! Send requests to /subtitles"}
+        return HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
