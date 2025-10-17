@@ -1,67 +1,76 @@
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.middleware.cors import CORSMiddleware
+from http.server import BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
 import yt_dlp
 import json
+import re
 
-app = FastAPI()
+# Vercel автоматично знайде цей клас 'handler' і використає його для обробки запитів
+class handler(BaseHTTPRequestHandler):
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+    def do_GET(self):
+        # Додаємо CORS заголовок, щоб браузер дозволив запит
+        self.send_header('Access-Control-Allow-Origin', '*')
+        
+        # Парсимо URL, щоб отримати параметр ?video_url=...
+        query_components = parse_qs(urlparse(self.path).query)
+        video_url = query_components.get('video_url', [None])[0]
 
-# Важливо: шлях тепер '/', тому що Vercel вже обробив /api/subtitles
-@app.get("/")
-def get_subtitles_handler(video_url: str = Query(..., description="URL of the YouTube video")):
-    
-    ydl_opts = {
-        'writesubtitles': True,      # Вказуємо, що потрібні субтитри
-        'sublang': 'uk,en,ru',       # Мови, які нас цікавлять
-        'skip_download': True,       # Не завантажувати саме відео
-        'extract_flat': True,        # Просто отримати інформацію
-        'outtmpl': '/tmp/%(id)s',     # Куди тимчасово зберегти файл (Vercel дозволяє писати в /tmp)
-    }
+        if not video_url:
+            self.send_response(400)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'detail': 'Параметр video_url відсутній'}).encode('utf-8'))
+            return
 
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(video_url, download=False)
-            video_id = info.get('id')
+        # Налаштування для yt-dlp, щоб отримати лише субтитри
+        ydl_opts = {
+            'writesubtitles': True,
+            'subtitleslangs': ['uk', 'en', 'ru'],
+            'skip_download': True,
+            'quiet': True,
+        }
 
-            # yt-dlp повертає словник з доступними субтитрами
-            available_subs = info.get('subtitles', {})
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(video_url, download=False)
+                
+                # 'requested_subtitles' - це ключ, де yt-dlp зберігає знайдені субтитри
+                requested_subtitles = info.get('requested_subtitles')
+                
+                if not requested_subtitles:
+                    self.send_response(404)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'detail': 'Субтитри для обраних мов не знайдено.'}).encode('utf-8'))
+                    return
+                
+                # Беремо першу доступну мову з результату
+                lang_code = next(iter(requested_subtitles))
+                sub_data = requested_subtitles[lang_code]['data']
+
+                # Очищуємо текст субтитрів від тайм-кодів та іншого сміття
+                lines = sub_data.split('\n')
+                text_lines = []
+                for line in lines:
+                    # Ігноруємо службові рядки формату VTT/SRT
+                    if '-->' in line or re.match(r'^\d+$', line.strip()) or not line.strip() or 'WEBVTT' in line:
+                        continue
+                    # Видаляємо теги, як-от <c> або <i>
+                    clean_line = re.sub(r'<[^>]+>', '', line)
+                    text_lines.append(clean_line.strip())
+                
+                full_text = " ".join(text_lines)
+
+                # Відправляємо успішну відповідь
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'transcript': full_text}).encode('utf-8'))
+                
+        except Exception as e:
+            self.send_response(500)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'detail': f'Сталася помилка: {str(e)}'}).encode('utf-8'))
             
-            # Шукаємо потрібну нам мову
-            target_lang = None
-            for lang in ['uk', 'en', 'ru']:
-                if lang in available_subs:
-                    target_lang = lang
-                    break
-
-            if not target_lang:
-                raise HTTPException(status_code=404, detail="Subtitles not found for requested languages.")
-
-            # Отримуємо дані субтитрів (це буде список)
-            subtitles_data = available_subs[target_lang]
-            
-            # Зазвичай це список словників, з яких нам потрібен лише текст
-            full_text = " ".join(item.get('line', '') for item in subtitles_data if 'line' in item)
-            
-            # Якщо з якоїсь причини yt-dlp не повернув текст напряму, то це запасний варіант (малоймовірно)
-            if not full_text:
-                # Цей блок може не знадобитись, але він для надійності
-                sub_info = ydl.extract_info(video_url, download=True)
-                sub_file_path = f"/tmp/{video_id}.{target_lang}.json"
-                with open(sub_file_path, 'r') as f:
-                    data = json.load(f)
-                    full_text = " ".join(event.get('segs', [{}])[0].get('utf8', '') for event in data.get('events', []))
-
-            if not full_text.strip():
-                 raise HTTPException(status_code=404, detail="Found subtitle track, but it was empty.")
-
-            return {"transcript": full_text.strip()}
-
-    except Exception as e:
-        return HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
+        return
