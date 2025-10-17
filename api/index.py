@@ -3,8 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from youtube_transcript_api import YouTubeTranscriptApi
 import re
 
+# Vercel шукає змінну з назвою "app"
 app = FastAPI()
 
+# Middleware для CORS залишаємо, це важливо
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -16,7 +18,7 @@ app.add_middleware(
 def extract_video_id(url):
     patterns = [
         r'(?:https?:\/\/)?(?:www\.)?youtube\.com\/watch\?v=([a-zA-Z0-9_-]{11})',
-        r'(?:https?:\/\/)?(?:www\.)?youtu\.be\/([a-zA-Z0-9_-]{11})'
+        r'(?:https?:\/\/)?youtu\.be\/([a-zA-Z0-9_-]{11})'
     ]
     for pattern in patterns:
         match = re.search(pattern, url)
@@ -24,8 +26,10 @@ def extract_video_id(url):
             return match.group(1)
     return None
 
-# Ось тут виправлення:
-@app.get("/subtitles")
+# Оскільки vercel.json перенаправляє сюди всі запити з "/api/",
+# то наш ендпоінт має відповідати на "/subtitles"
+# Повний шлях для фронтенда буде /api/subtitles
+@app.get("/api/subtitles")
 def get_subtitles(video_url: str = Query(..., description="URL of the YouTube video")):
     video_id = extract_video_id(video_url)
     
@@ -37,9 +41,12 @@ def get_subtitles(video_url: str = Query(..., description="URL of the YouTube vi
         formatted_transcript = " ".join([item['text'] for item in transcript])
         return {"transcript": formatted_transcript}
     except Exception as e:
-        raise HTTPException(status_code=404, detail=f"Could not retrieve subtitles. Error: {str(e)}")
+        # Повертаємо більш детальну помилку, якщо субтитрів немає
+        if "No transcripts were found" in str(e):
+             raise HTTPException(status_code=404, detail="For this video, subtitles in Ukrainian, English, or Russian were not found.")
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
 
-# Важливо: Vercel очікує, що головний файл в /api буде обробляти всі запити до /api/*
-# Тому ми повертаємо сам FastAPI app, а Vercel вже розбереться з роутінгом.
-# Для цього іноді потрібно додати обробник для кореневого шляху, якщо Vercel не справляється.
-# Але у вашому випадку заміна шляху вище має вирішити проблему.
+# Це необов'язково, але корисно для перевірки, чи працює API
+@app.get("/api")
+def read_root():
+    return {"message": "API is working correctly!"}
