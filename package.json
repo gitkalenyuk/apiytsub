@@ -1,0 +1,8 @@
+{
+  "name": "yt-subs-api",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "youtube-captions-scraper": "^2.0.2"
+  }
+}
